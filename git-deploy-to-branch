@@ -165,7 +165,7 @@ fi
 
 # Create a worktree
 declare tempdir="$(mktemp -d)"
-git worktree add "$tempdir"
+git worktree add --detach --no-checkout "$tempdir"
 
 # Try to create orphan pages branch, otherwise check it out.
 (
