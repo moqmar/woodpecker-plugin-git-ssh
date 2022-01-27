@@ -1,0 +1,195 @@
+#!/bin/bash
+set -euo pipefail
+
+function show_help {
+	echo "What it is for:"
+	echo "    Overwrites a directory in another branch with one from the working dir."
+	echo "    Can be used e.g. to deploy static website output to a branch:"
+	echo '    $ mkdocs build && git deploy-to-branch --from ./site --push origin/pages --force -m "Update at $(date -Is)"'
+	echo ""
+	echo "How it works:"
+	echo "    1. Create temporary worktree on the target branch"
+	echo "    2. rsync the deploy directory to the target directory"
+        echo "    3. git add ... && git commit ..."
+	echo "    4. git push (optional)"
+	echo ""
+	echo "Usage: git deploy-to-branch"
+	echo "                            [--branch <branch>]"
+	echo "                            [--from <dir>]"
+	echo "                            [--to <dir>]"
+        echo "                            [<push-options>]"
+        echo "                            [<commit-options>]"
+        echo "                            [-- [<add-options>]]"
+        echo "                            <pathspec>..."
+        echo ""
+	echo "    --branch <branch>     use a specific target branch name instead of a random name"
+	echo "    --from <dir>          the directory to deploy, relative to the current working directory"
+	echo "    --to <dir>            the target directory in the other branch, relative to the repository root"
+	echo "    --keep                don't remove temporary branch after build"
+	echo ""
+	echo "Push options"
+        echo "    --push <target>       push the result to the specified reference (e.g. origin/pages)"
+	echo "    -f, --force           force updates when pushing to <target>"
+	echo "                          other 'git push' args can be specified in $GIT_PUSH_ARGS"
+	echo ""
+	echo "Commit options"
+	echo "    --amend               amend previous commit OR create a new one if there is none"
+        echo "    -a, --all             add all files before committing (effectively 'git add --all')"
+        echo "    <commit-options>      most other 'git commit' options can be used here"
+	echo ""
+	echo "Add options"
+	echo "    -- <add-options>      all other 'git add' options can be used here (but the -- is required!)"
+	echo "    <pathspec>            list of files to commit, relative to the directory to deploy (see --from)"
+	echo "                          if there are no files specified, --all is assumed"
+	echo ""
+}
+
+function cleanup {
+	[ -z "${tempdir:-}" ] || git worktree remove --force "$tempdir" || true
+	if [ -n "${push_target:-}" ] && [ -n "${push_remove:-}" ]; then
+		[ -z "${branch:-}" ] || git branch -D "$branch"
+	fi
+}
+trap cleanup EXIT
+
+# parse options
+declare branch=
+declare from_dir=
+declare to_dir=
+declare add_options=()
+
+declare commit_amend=
+declare commit_options=()
+
+declare push_options=()
+declare push_target=
+declare push_remove=yes
+
+declare next_opt=
+
+while [ $# -gt 0 ]; do
+	case "$next_opt" in
+	"--branch")
+		branch="$1"
+		next_opt=
+		;;
+	"--from")
+		from_dir="$1"
+		next_opt=
+		;;
+	"--to")
+		to_dir="$1"
+		next_opt=
+		;;
+	"--push")
+		push_target="$1"
+		next_opt=
+		;;
+	"--pathspec-from-file")
+		add_options+=("$next_opt" "$1")
+		;;
+	"for-commit")
+		commit_options+=("$1")
+		;;
+	"")
+		case "$1" in
+			"--")
+				# stop parsing
+				add_options+=("$@")
+				shift $#
+				;;
+			"-h"|"--help")
+				show_help
+				exit 0
+				;;
+			"-a"|"-A"|"--all"|"--no-ignore-removal")
+				# they all mean the same in this context, but "git add" doesn't support lowercase "-a"
+				add_options+=("--all")
+				;;
+			"-f"|"--force")
+				push_options+=("$1")
+				;;
+			"--branch"|"--from"|"--to"|"--push"|"--pathspec-from-file")
+				next_opt="$1"
+				;;
+			"--keep")
+				push_remove=
+				;;
+			"--amend")
+				# we need this separate so we can omit it if there's no commit yet
+				commit_amend="$1"
+				;;
+			"-C"|"--reuse-message"|"-c"|"--reedit-message"|"--fixup"|"--squash"|"-F"|"-file"|"--author"|"--date"|"-m"|"--message"|"-t"|"--template"|"--cleanup"|"--pathspec-from-file")
+				# those are commit options that take an additional argument
+				commit_options+=("$1")
+				next_opt="for-commit"
+				;;
+			"-o"|"--only")
+				# skip; only affects files directly supplied to "git commit" but we're using "git add"
+				;;
+			"--pathspec-from-file="*|"--pathspec-file-nul")
+				add_options=("$1")
+				;;
+			"-"*)
+				commit_options+=("$1")
+				;;
+			*)
+				add_options+=("$1")
+				;;
+		esac
+		;;
+	*)
+		;;
+	esac
+	[ $# -eq 0 ] || shift
+done
+
+if [ -z "$branch" ]; then
+	# no branch set, create a random one
+	while true; do
+		branch="$(basename $(mktemp -uqt deploy-XXXXXXXXXX))"
+		if ! git rev-parse --quiet --verify >/dev/null; then
+			# branch doesn't exist, we can use it
+			break
+		fi
+	done
+elif [ -n "$push_remove" ]; then
+	# don't remove user-supplied branch
+	push_remove=
+fi
+
+# Create a worktree
+declare tempdir="$(mktemp -d)"
+git worktree add "$tempdir"
+
+# Try to create orphan pages branch, otherwise check it out.
+(
+	cd "$tempdir"
+	git switch --ignore-other-worktrees --orphan "$branch" || \
+	git switch --ignore-other-worktrees "$branch"
+)
+
+# Sync files to worktree
+to_dir="$(cd / && realpath -qms "$to_dir" | sed 's:^/::' || true)"
+mkdir -p "$tempdir/$to_dir/"
+rsync -a --delete --exclude ".git" "./$from_dir/" "$tempdir/$to_dir/"
+
+# Add, commit & push the files
+(
+	cd "$tempdir/$to_dir"
+	if [ ${#add_options[@]} -eq 0 ]; then
+		add_options+=("--all")
+	fi
+	git add "${add_options[@]}"
+
+	if [ -n "$commit_amend" ] && ! git rev-parse --quiet --verify HEAD >/dev/null; then
+		# --amend was set, but there's no commit yet on that branch - this ensures that it still works
+		commit_amend=
+	fi
+	git commit $commit_amend "${commit_options[@]}"
+
+	if [ -n "$push_target" ]; then
+		git push ${GIT_PUSH_ARGS:-} "${push_options[@]}" "$(echo "$push_target" | sed 's@/.*@@')" "$branch$(echo "$push_target" | sed -e 's@^[^/]*@@' -e 's@^/@:@')"
+	fi
+)
+

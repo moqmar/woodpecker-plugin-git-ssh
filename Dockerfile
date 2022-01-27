@@ -11,4 +11,5 @@ ENV PLUGIN_SSH_ONLY_TRUST_DNS_KEYS="false"
 ENV PLUGIN_ACTION=""
 
 COPY woodpecker-git.sh /usr/bin/
+COPY git-deploy-to-branch /usr/bin/
 ENTRYPOINT ["/usr/bin/woodpecker-git.sh"]
