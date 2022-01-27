@@ -144,6 +144,11 @@ while [ $# -gt 0 ]; do
 	[ $# -eq 0 ] || shift
 done
 
+if [ -z "$branch" ] && [ -n "$push_remove" ] && [ -z "$push_target" ]; then
+	echo "Either --branch, --keep or --push must be specified, otherwise this tool does nothing. Type 'git deploy-to-branch -h' for more information."
+	exit 1
+fi
+
 if [ -z "$branch" ]; then
 	# no branch set, create a random one
 	while true; do

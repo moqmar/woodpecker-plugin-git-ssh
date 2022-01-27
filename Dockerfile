@@ -1,6 +1,6 @@
 FROM alpine
 
-RUN apk add --no-cache git openssh-client
+RUN apk add --no-cache git openssh-client bash coreutils rsync
 
 ENV PLUGIN_AUTHOR_NAME="Woodpecker CI"
 ENV PLUGIN_AUTHOR_EMAIL="git@woodpecker-ci.org"
